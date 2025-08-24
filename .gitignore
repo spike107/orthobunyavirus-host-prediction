@@ -1,5 +1,31 @@
+# Python cache/temporary files
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+
+# Virtual environments
 .venv/
+env/
+venv/
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Data and results (user-provided or generated)
 data/
 results/
+config/
+
+# Logs
+*.log
+pipeline_log.txt
+
+# Jupyter notebooks checkpoints
+.ipynb_checkpoints/
+
+# Example: allow placeholders if needed
+!data/.gitkeep
+!results/.gitkeep
+!config/.gitkeep
