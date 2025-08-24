@@ -162,7 +162,7 @@ On our hardware, a **full run (136 species)** with group-aware CV required ~13â€
   author  = {Jin, Fengshi},
   title   = {Orthobunyavirus Host-Prediction Pipeline},
   year    = {2025},
-  url     = {https://github.com/spike107/orthobunyavirus-host-prediction},
+  url     = {https://github.com/spike107/orthobunyavirus-host-prediction/releases/tag/v1.0.0},
   version = {v1.0.0}
 }
 ```
