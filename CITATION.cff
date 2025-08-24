@@ -1,1 +1,21 @@
-title: Orthobunyavirus Host-Prediction Pipeline
+cff-version: 1.2.0
+message: "If you use this repository, please cite it as below."
+title: "Orthobunyavirus Host-Prediction Pipeline"
+version: "v1.0.0"
+date-released: 2025-08-25
+authors:
+  - family-names: "Jin"
+    given-names: "Fengshi"
+repository-code: "https://github.com/spike107/orthobunyavirus-host-prediction"
+url: "https://github.com/spike107/orthobunyavirus-host-prediction/releases/tag/v1.0.0"
+doi: ""
+license: "MIT"
+preferred-citation:
+  type: software
+  authors:
+    - family-names: "Jin"
+      given-names: "Fengshi"
+  title: "Orthobunyavirus Host-Prediction Pipeline"
+  version: "v1.0.0"
+  year: 2025
+  url: "https://github.com/spike107/orthobunyavirus-host-prediction/releases/tag/v1.0.0"
