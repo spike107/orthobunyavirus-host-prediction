@@ -19,10 +19,19 @@ from sklearn.model_selection import GridSearchCV
 import json
 from sklearn.metrics import classification_report, accuracy_score, f1_score, recall_score, roc_auc_score
 import umap
-import iFeatureOmegaCLI
+
+try:
+    import iFeatureOmegaCLI 
+    HAS_IFEATURE = True
+except Exception:
+    HAS_IFEATURE = False
+
 import warnings
 warnings.filterwarnings('ignore')
 from datetime import datetime
+import argparse
+from pathlib import Path
+import shutil
 
 # ========== Tee class: write to file and console simultaneously ==========
 class Tee:
@@ -796,6 +805,9 @@ def extract_rscu_cai_features(cds_fasta, meta_main, reference_fasta='human_HK_CD
 def extract_protein_features(protein_fasta, protein_meta, meta_main, output_csv='protein_features.csv'):
     """Extract protein features via iFeatureOmegaCLI."""
     print("\n=== Extract Protein Features ===")
+    if not HAS_IFEATURE:
+        print("✗ iFeatureOmegaCLI not available — skipping protein feature extraction.")
+        return pd.DataFrame()
     # Keep proteins derived from complete sequences.
     valid_ids = meta_main[meta_main['completeness'].isin(['complete_sequence', 'complete_cds'])]['id'].str.replace(r'\.\d+$', '', regex=True)
     protein_meta['nucleotide_id_clean'] = protein_meta['nucleotide_id'].str.replace(r'\.\d+$', '', regex=True)
@@ -901,54 +913,117 @@ def merge_features(meta_main, kmer_df=None, rscu_df=None, protein_df=None):
         results['protein_only'] = protein_with_meta
         print(f"  protein_only: {protein_with_meta.shape}")
 
-    # Strategy 2: Intersection set (fair comparison).
-    if all([kmer_df is not None, rscu_df is not None, protein_df is not None]):
-        kmer_ids = set(kmer_df['id'])
-        
-        # Strip version numbers for alignment.
-        meta_main['id_clean'] = meta_main['id'].str.replace(r'\.\d+$', '', regex=True)
-        rscu_df['nucleotide_id_clean'] = rscu_df['nucleotide_id'].str.replace(r'\.\d+$', '', regex=True)
-        protein_df['nucleotide_id_clean'] = protein_df['nucleotide_id'].str.replace(r'\.\d+$', '', regex=True)
+    # Strategy 2: Adaptive Intersection set (fair comparison).
+    # ---------------------------------------------------------------
+    # adaptively choose based on number of available sets:
+    #  - 3 3 sets: intersection of all three;
+    #  - 2 sets: intersection of the two;
+    #  - 1 set: directly use that set;
+    #  - if intersection is empty: fallback order is RSCU → k-mer → protein.
 
-        # Find common IDs.
-        kmer_ids_clean = set(meta_main[meta_main['id'].isin(kmer_ids)]['id_clean'])
-        common_ids = kmer_ids_clean & set(rscu_df['nucleotide_id_clean']) & set(protein_df['nucleotide_id_clean'])
+    def _ensure_clean_cols():
+        # Prepare nucleotide_id_clean for RSCU/Protein
+        if rscu_df is not None and 'nucleotide_id_clean' not in rscu_df.columns and 'nucleotide_id' in rscu_df.columns:
+            rscu_df['nucleotide_id_clean'] = rscu_df['nucleotide_id'].str.replace(r'\.\d+$', '', regex=True)
+        if protein_df is not None and 'nucleotide_id_clean' not in protein_df.columns and 'nucleotide_id' in protein_df.columns:
+            protein_df['nucleotide_id_clean'] = protein_df['nucleotide_id'].str.replace(r'\.\d+$', '', regex=True)
+
+    _ensure_clean_cols()
+
+    # Assemble available sets and their clean-ID sets
+    available = {}
+    if kmer_df is not None:
+        # Sample IDs for k-mer come from meta_main mapping (kmer_df['id'] may include version numbers)
+        kmer_ids_clean = set(
+            meta_main.loc[meta_main['id'].isin(kmer_df['id']), 'id_clean']
+        )
+        available['kmer'] = {'df': kmer_df, 'ids': kmer_ids_clean}
+    if rscu_df is not None:
+        rscu_ids_clean = set(rscu_df['nucleotide_id_clean']) if 'nucleotide_id_clean' in rscu_df.columns else set()
+        available['rscu'] = {'df': rscu_df, 'ids': rscu_ids_clean}
+    if protein_df is not None:
+        protein_ids_clean = set(protein_df['nucleotide_id_clean']) if 'nucleotide_id_clean' in protein_df.columns else set()
+        available['protein'] = {'df': protein_df, 'ids': protein_ids_clean}
+
+    # If no available set exists, return
+    if not available:
+        return results
+
+    # Compute intersection of available sets (only meaningful when ≥2 sets)
+    from functools import reduce
+    key_order_for_base = ['kmer', 'rscu', 'protein']  # When merging, prioritize k-mer as the base (if present)
+    keys = list(available.keys())
+
+    common_ids = None
+    if len(keys) >= 2:
+        common_ids = reduce(lambda a, b: a & b, (available[k]['ids'] for k in keys))
+    elif len(keys) == 1:
+        # If only one available set, no intersection needed
+        common_ids = available[keys[0]]['ids']
+
+    def _kmer_filter_to_ids(df, id_set):
+        if id_set is None:
+            return df.copy()
+        tmp = df.copy()
+        tmp['id_clean'] = tmp['id'].str.replace(r'\.\d+$', '', regex=True)
+        return tmp[tmp['id_clean'].isin(id_set)]
+
+    def _pick_base_key():
+        for k in key_order_for_base:
+            if k in available:
+                return k
+        return keys[0]
+
+    intersect_df = None
+    if common_ids and len(common_ids) > 0:
+        base_key = _pick_base_key()
+        base_df = available[base_key]['df']
+
         
-        if common_ids:
-            # Filter to common samples.
-            kmer_common = kmer_df[kmer_df['id'].str.replace(r'\.\d+', '', regex=True).isin(common_ids)]
-            rscu_common = rscu_df[rscu_df['nucleotide_id_clean'].isin(common_ids)]
-            protein_common = protein_df[protein_df['nucleotide_id_clean'].isin(common_ids)]
-            
-            # Merge all features.
-            # First join k-mer with meta.
-            intersect_df = kmer_common.copy()
-            # Add RSCU features (match on nucleotide_id_clean).
+        if base_key == 'kmer':
+            intersect_df = _kmer_filter_to_ids(base_df, common_ids)
+        elif base_key == 'rscu':          
+            intersect_df = base_df[base_df['nucleotide_id_clean'].isin(common_ids)].copy()
+        else:  # protein
+            intersect_df = base_df[base_df['nucleotide_id_clean'].isin(common_ids)].copy()
+
+        # Merge the remaining features
+        if 'id_clean' not in intersect_df.columns:
+            if 'id' in intersect_df.columns:
+                intersect_df['id_clean'] = intersect_df['id'].str.replace(r'\.\d+$', '', regex=True)
+            elif 'nucleotide_id_clean' in intersect_df.columns:
+                intersect_df['id_clean'] = intersect_df['nucleotide_id_clean']
+        # Merge RSCU
+        if 'rscu' in available and base_key != 'rscu':
+            rscu_common = rscu_df[rscu_df['nucleotide_id_clean'].isin(common_ids)].copy()
             rscu_features = rscu_common.drop(columns=['species_std', 'segment', 'final_label'], errors='ignore')
             rscu_features = rscu_features.drop_duplicates(subset=['nucleotide_id_clean'])
-            
-            intersect_df['id_clean'] = intersect_df['id'].str.replace(r'\.\d+', '', regex=True)
             intersect_df = intersect_df.merge(
-                rscu_features,
-                left_on='id_clean',
-                right_on='nucleotide_id_clean',
-                how='left'
+                rscu_features, left_on='id_clean', right_on='nucleotide_id_clean', how='left', suffixes=('', '_rscu')
             )
-
-            # Add protein features (also via nucleotide_id_clean).
+        # Merge protein
+        if 'protein' in available and base_key != 'protein':
+            protein_common = protein_df[protein_df['nucleotide_id_clean'].isin(common_ids)].copy()
             protein_features = protein_common.drop(columns=['species_std', 'segment', 'final_label'], errors='ignore')
             protein_features = protein_features.drop_duplicates(subset=['nucleotide_id_clean'])
-            
             intersect_df = intersect_df.merge(
-                protein_features,
-                left_on=intersect_df['id'].str.replace(r'\.\d+', '', regex=True),
-                right_on='nucleotide_id_clean',
-                how='left',
-                suffixes=('', '_protein')
+                protein_features, left_on='id_clean', right_on='nucleotide_id_clean', how='left', suffixes=('', '_protein')
             )
-            
-            results['intersect'] = intersect_df
-            print(f"  intersect: {intersect_df.shape}")
+    else:
+        # If intersection is empty or only one set remains: fallback to a single set (priority RSCU → k-mer → protein)
+        for key in ['rscu', 'kmer', 'protein']:
+            if key in available and len(available[key]['ids']) > 0:
+                if key == 'kmer':
+                    intersect_df = _kmer_filter_to_ids(available[key]['df'], None)
+                else:
+                    intersect_df = available[key]['df'].copy()
+                print(f"[Fallback] 'intersect' unavailable → using {key}-only feature set as the working dataset.")
+                break
+
+    if intersect_df is not None and not intersect_df.empty:
+        results['intersect'] = intersect_df
+        print(f"  intersect: {intersect_df.shape}")
+        if common_ids is not None:
             print(f"  Common samples: {len(common_ids)}")
     
     return results
@@ -1555,6 +1630,15 @@ def run_ml_evaluation(merged_features, output_dir='results', run_lovo=False, max
     import pandas as pd
     os.makedirs(output_dir, exist_ok=True)
     print("\n=== Machine Learning Evaluation ===")
+    feature_sets = {
+        '3mer': lambda df: [col for col in df.columns if col.startswith('3mer_')],
+        '6mer': lambda df: [col for col in df.columns if col.startswith('6mer_')],
+        'rscu': lambda df: [col for col in df.columns if col.startswith('RSCU_')],
+        'CTriad': lambda df: [col for col in df.columns if col.startswith('CTriad')],
+        'all_protein': lambda df: [col for col in df.columns if any(col.startswith(p) for p in ['CTDC', 'CTDT', 'CTDD', 'CTriad', 'DistancePair', 'PseAAC'])],
+        'mixed_3mer_rscu': lambda df: [col for col in df.columns if col.startswith('3mer_') or col.startswith('RSCU_')],
+        'mixed_3mer_rscu_ctriad': lambda df: [col for col in df.columns if col.startswith('3mer_') or col.startswith('RSCU_') or col.startswith('CTriad')]
+    }
     
     if optimize_params:
         print("✓ Parameter optimization ENABLED (group-aware 5-fold CV)")
@@ -3238,7 +3322,7 @@ def run_pipeline(config):
     
     # Extract RSCU/CAI features.
     rscu_df = None
-    if 'cds_fasta' in config:
+    if 'cds_fasta' in config and config['cds_fasta']:
         rscu_df = extract_rscu_cai_features(
             cds_fasta=config['cds_fasta'],
             meta_main=meta_main,
@@ -3249,33 +3333,49 @@ def run_pipeline(config):
     
     # Extract protein features.
     protein_df = None
-    if 'protein_fasta' in config:
+    if 'protein_fasta' in config and config['protein_fasta']:
         protein_df = extract_protein_features(
             config['protein_fasta'],
             protein_meta,
             meta_main, 
             output_csv='protein_features.csv'
         )
-    protein_df['nucleotide_id_clean'] = protein_df['nucleotide_id'].str.replace(r'\.\d+$', '', regex=True)
 
     meta_main['id_clean'] = meta_main['id'].str.replace(r'\.\d+$', '', regex=True)
-    rscu_df['nucleotide_id_clean'] = rscu_df['nucleotide_id'].str.replace(r'\.\d+$', '', regex=True)
 
-    # Find common clean IDs.
-    common_rscu_ids = set(meta_main['id_clean']) & set(rscu_df['nucleotide_id_clean'])
-    common_protein_ids = set(meta_main['id_clean']) & set(protein_df['nucleotide_id_clean'])
+    if rscu_df is not None and not rscu_df.empty:
+        rscu_df['nucleotide_id_clean'] = rscu_df['nucleotide_id'].str.replace(r'\.\d+$', '', regex=True)
+    else:
+        rscu_df = pd.DataFrame(columns=['nucleotide_id', 'nucleotide_id_clean', 'species_std', 'segment', 'final_label'])
 
-    # Filter subset.
-    rscu_only = rscu_df[rscu_df['nucleotide_id_clean'].isin(common_rscu_ids)].copy()
-    protein_only = protein_df[protein_df['nucleotide_id_clean'].isin(common_protein_ids)].copy()
+    if protein_df is not None and not protein_df.empty and 'nucleotide_id' in protein_df.columns:
+        protein_df['nucleotide_id_clean'] = protein_df['nucleotide_id'].str.replace(r'\.\d+$', '', regex=True)
+    else:
+        protein_df = pd.DataFrame(columns=['protein_id', 'nucleotide_id', 'nucleotide_id_clean', 'species_std', 'segment', 'final_label'])
 
-    # Merge species info (for heatmaps).
-    rscu_only = rscu_only.merge(meta_main[['id_clean', 'species_std']], left_on='nucleotide_id_clean', right_on='id_clean', how='left')
-    protein_only = protein_only.merge(meta_main[['id_clean', 'species_std']], left_on='nucleotide_id_clean', right_on='id_clean', how='left')
+    # Only perform alignment/merge (if required) when the corresponding tables are non-empty
+    if not rscu_df.empty:
+        common_rscu_ids = set(meta_main['id_clean']) & set(rscu_df['nucleotide_id_clean'])
+        rscu_only = rscu_df[rscu_df['nucleotide_id_clean'].isin(common_rscu_ids)].copy()
+        rscu_only = rscu_only.merge(
+            meta_main[['id_clean', 'species_std']],
+            left_on='nucleotide_id_clean', right_on='id_clean', how='left'
+        )
 
-    # Merge features.
-    merged_features = merge_features(meta_main, kmer_df, rscu_df, protein_df)
-
+    if not protein_df.empty:
+        common_protein_ids = set(meta_main['id_clean']) & set(protein_df['nucleotide_id_clean'])
+        protein_only = protein_df[protein_df['nucleotide_id_clean'].isin(common_protein_ids)].copy()
+        protein_only = protein_only.merge(
+            meta_main[['id_clean', 'species_std']],
+            left_on='nucleotide_id_clean', right_on='id_clean', how='left'
+        )
+    # Merge all features.
+    merged_features = merge_features(
+        meta_main,
+        kmer_df,
+        (None if rscu_df.empty else rscu_df),
+        (None if protein_df.empty else protein_df)
+    )
     # Add pipeline_feature_set_coverage_summary.csv
     summary = {
         'Feature': [],
@@ -3317,21 +3417,21 @@ def run_pipeline(config):
     num_human = 12
     num_nonhuman = 8
 
-    # if len(human_species) >= num_human and len(nonhuman_species) >= num_nonhuman:
-    #     selected_species = pd.concat([
-    #         human_species.sample(num_human, random_state=42),
-    #         nonhuman_species.sample(num_nonhuman, random_state=42)
-    #     ])
-    #     print("[Debug] Selected species:", selected_species.tolist())
+    if len(human_species) >= num_human and len(nonhuman_species) >= num_nonhuman:
+        selected_species = pd.concat([
+            human_species.sample(num_human, random_state=42),
+            nonhuman_species.sample(num_nonhuman, random_state=42)
+        ])
+        print("[Debug] Selected species:", selected_species.tolist())
 
-    #     # Filter intersect.
-    #     intersect_df = intersect_df[intersect_df['species_std'].isin(selected_species)]
-    #     merged_features['intersect'] = intersect_df
+        # Filter intersect.
+        intersect_df = intersect_df[intersect_df['species_std'].isin(selected_species)]
+        merged_features['intersect'] = intersect_df
 
-    #     # Quickly check label distribution.
-    #     print("[Debug] Filtered label counts:\n", intersect_df['final_label'].value_counts())
-    # else:
-    #     print(f"[Warning] Too few species to sample {num_human} human + {num_nonhuman} nonhuman. Running full set.")
+        # Quickly check label distribution.
+        print("[Debug] Filtered label counts:\n", intersect_df['final_label'].value_counts())
+    else:
+        print(f"[Warning] Too few species to sample {num_human} human + {num_nonhuman} nonhuman. Running full set.")
 
     # ========== Debug End ==========
 
@@ -3339,7 +3439,7 @@ def run_pipeline(config):
     train_test_df, lovo_df = run_ml_evaluation(
         merged_features, 
         output_dir='results',
-        run_lovo=None,
+        run_lovo=True,
         max_species=None,  # Or set numerical limits.
         optimize_params=True  # Enable group-aware 5-fold parameter tuning.
     )
@@ -3377,7 +3477,6 @@ def run_pipeline(config):
     if not train_test_df.empty:
         total_operations += 1
         if plot_performance_comparison_single(train_test_df, "results/performance_comparison_single"):
-            success_count += 1
             print("✓ Performance comparison plots generated")
         else:
             print("✗ Performance comparison plots failed")
@@ -3665,28 +3764,120 @@ def run_pipeline(config):
 
     print("All heatmaps finished.")
 
+def _pick_first_existing(paths):
+    """Given a list of candidate paths, return the first existing absolute path;
+    if none exists, return the absolute path of the first candidate (used in error messages)."""
+    for p in paths:
+        if p and Path(p).exists():
+            return str(Path(p).resolve())
+    return str(Path(paths[0]).resolve())
+
 # Main entry.
 if __name__ == '__main__':
-    # Log redirection: must be set before any print.
-    log_file = open('pipeline_log.txt', 'w', encoding='utf-8')
+    # Determine repository root based on script location (one level above src)
+    SRC_DIR  = Path(__file__).resolve().parent
+    REPO_DIR = SRC_DIR.parent
+    DATA_DIR = REPO_DIR / "data"
+    RESULTS_DIR = REPO_DIR / "results"
+
+    parser = argparse.ArgumentParser()
+    # Note: --nucleotide / --nonhuman correspond to "human / nonhuman nucleotide FASTA"
+    parser.add_argument("--nucleotide", help="Human nucleotide FASTA (legacy: sequences_human.fasta; alt: data/nucleotide.fasta)")
+    parser.add_argument("--nonhuman",  help="Nonhuman nucleotide FASTA (legacy: sequences_nothuman.fasta; alt: data/nonhuman.fasta)")
+    parser.add_argument("--cds",       help="CDS FASTA (legacy: sequences_CDS.fasta; alt: data/cds.fasta)")
+    parser.add_argument("--protein",   help="Protein FASTA (legacy: sequences_protein.fasta; alt: data/protein.fasta)")
+    parser.add_argument("--reference", help="CAI reference FASTA (legacy: human_HK_CDS.cleaned.fasta; alt: data/human_HK_CDS.cleaned.fasta)")
+    parser.add_argument("--outdir",    default=str(RESULTS_DIR), help="Output directory (default: <repo>/results)")
+    args = parser.parse_args()
+
+    # Auto-detection: prioritize legacy naming (repo root), fallback to README naming (data/)
+    human_fasta = _pick_first_existing([
+        args.nucleotide or (REPO_DIR / "sequences_human.fasta"),
+        DATA_DIR / "nucleotide.fasta"
+    ])
+    nonhuman_fasta = _pick_first_existing([
+        args.nonhuman or (REPO_DIR / "sequences_nothuman.fasta"),
+        DATA_DIR / "nonhuman.fasta"
+    ])
+    cds_fasta = _pick_first_existing([
+        args.cds or (REPO_DIR / "sequences_CDS.fasta"),
+        DATA_DIR / "cds.fasta"
+    ])
+    protein_fasta = _pick_first_existing([
+        args.protein or (REPO_DIR / "sequences_protein.fasta"),
+        DATA_DIR / "protein.fasta"
+    ])
+    reference_fasta = _pick_first_existing([
+        args.reference or (REPO_DIR / "human_HK_CDS.cleaned.fasta"),
+        DATA_DIR / "human_HK_CDS.cleaned.fasta"
+    ])
+
+    # ---- Record a snapshot of root directory files *before* execution, for collecting scattered outputs later ----
+    before_files = {p.resolve() for p in REPO_DIR.glob("*") if p.is_file()}
+
+    # Build absolute-path config
+    OUTDIR = Path(args.outdir).resolve()
+    OUTDIR.mkdir(parents=True, exist_ok=True)
+    config = {
+        'human_fasta': human_fasta,
+        'nonhuman_fasta': nonhuman_fasta,
+        'cds_fasta': cds_fasta,
+        'protein_fasta': protein_fasta,
+        'reference_fasta': reference_fasta,
+        'outdir': str(OUTDIR)
+    }
+
+    log_path = OUTDIR / 'pipeline_log.txt'
+    log_file = open(log_path, 'w', encoding='utf-8')
     sys.stdout = Tee(sys.__stdout__, log_file)
     sys.stderr = Tee(sys.__stderr__, log_file)
 
     print("=== Script Start ===")
+    print("[INFO] Repository root:", REPO_DIR)
+    print("[INFO] Using config:")
+    for k, v in config.items():
+        print(f"  - {k}: {v}")
 
-    # Config file paths.
-    config = {
-        'human_fasta': 'sequences_human.fasta',
-        'nonhuman_fasta': 'sequences_nothuman.fasta',
-        'cds_fasta': 'sequences_CDS.fasta',  # Optional.
-        'protein_fasta': 'sequences_protein.fasta',  # Optional.
-        'reference_fasta': 'human_HK_CDS.cleaned.fasta'  # CAI reference sequences.
-    }
-    
-    # Set working directory.
-    os.chdir(r'C:\Users\2881578J\Documents\MSc_Project')
-    # Run pipeline.
+    # Run main pipeline (keep CWD at repo root to ensure reference files with relative paths can be read)
     run_pipeline(config)
+
+    # ---- After execution: collect "newly generated files scattered in repo root" into results ----
+    after_files = {p.resolve() for p in REPO_DIR.glob("*") if p.is_file()}
+    new_files = after_files - before_files
+
+    # Whitelist of input filenames (prevent them from being moved)
+    input_basenames = {
+        'sequences_human.fasta',
+        'sequences_nothuman.fasta',
+        'sequences_CDS.fasta',
+        'sequences_protein.fasta',
+        'human_HK_CDS.cleaned.fasta',
+        'Orthobunyavirus_taxonomy.xlsx',
+        'ICTV_2024_Taxa Renamed or Abolished.csv',
+        'ICTV_2024_MSL.csv',
+        'ICTV Orthobunyavirus.csv',
+        'human_virus_DB_species_clean.txt',
+    }
+
+    # Only relocate "newly added top-level files", restricted to common result suffixes, excluding input lists and log files just written
+    allowed_suffixes = {'.csv', '.tsv', '.txt', '.png', '.pdf', '.svg', '.json', '.log'}
+    moved = []
+    for f in new_files:
+        if (f.parent == REPO_DIR
+            and f.name not in input_basenames
+            and f.suffix.lower() in allowed_suffixes
+            and f != log_path.resolve()):
+            dest = OUTDIR / f.name
+            try:
+                shutil.move(str(f), str(dest))
+                moved.append(dest.name)
+            except Exception as e:
+                print(f"[WARN] Failed to move {f.name} to results: {e}")
+
+    if moved:
+        print(f"[INFO] Top-level outputs moved to {OUTDIR.name}/: {', '.join(moved)}")
+    else:
+        print("[INFO] No new top-level outputs to move.")
 
     print("=== Script End ===")
     log_file.close()
