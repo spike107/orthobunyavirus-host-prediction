@@ -22,10 +22,6 @@ Key script: `src/project_pipeline.py`.
 
 ## 2. Repository Layout
 
-> Note: the `config/`, `data/`, and `results/` directories are **not included** by default (they only contained placeholders).  
-> They will be created locally when running the pipeline.
-
-```
 .
 ├─ README.md
 ├─ environment.yml
@@ -33,9 +29,14 @@ Key script: `src/project_pipeline.py`.
 ├─ LICENSE
 ├─ CITATION.cff
 ├─ .gitignore
+├─ data/ # optional: place inputs here if using README-style names
+├─ results/ # created automatically; all outputs collected here
 └─ src/
-   └─ project_pipeline.py
+└─ project_pipeline.py
 ```
+
+> Note: the `data/` directory is optional. Users may either place input files in the repository root (legacy names) or under `data/` (README-style names).  
+> The `results/` directory is created automatically during runtime.
 
 ---
 
@@ -50,132 +51,138 @@ conda activate orthobunya
 ### pip
 ```bash
 python -m venv .venv
-# Windows:
-.venv\Scripts\activate
-# macOS/Linux:
-source .venv/bin/activate
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
 ### External tools
-- iFeatureOmegaCLI (for protein descriptors).
-- UMAP-learn for dimensionality reduction plots.
+- [iFeatureOmegaCLI](https://github.com/Superzchen/iFeatureOmega) for protein descriptors.  
+  This tool is **optional**: if not installed or if `--protein` is unset, protein features are skipped gracefully.  
+  The pipeline falls back to available feature sets (priority: **RSCU → k-mer → protein**).
 
 ---
 
 ## 4. Data acquisition
 
-Viral sequences were obtained from the **NCBI Virus portal** (Nucleotide, CDS, and Protein databases), retrieving **all records classified under the *Orthobunyavirus* genus** (NCBI Taxon ID: 11572). No filtering was applied at the download stage; instead, completeness checks and length thresholds (e.g. CDS ≥600 nt for RSCU/CAI) were enforced downstream in the pipeline.
+Viral sequences were obtained from the **NCBI Virus portal** (Nucleotide, CDS, and Protein databases), retrieving **all records classified under the *Orthobunyavirus* genus** (NCBI Taxon ID: 11572).  
+No filtering was applied at the download stage; instead, completeness checks and length thresholds (e.g. CDS ≥600 nt for RSCU/CAI) were enforced downstream in the pipeline.
 
-Raw sequence data are **not included** in this repository due to size and licensing constraints. Users should download the required FASTA files from NCBI and place them under a local `data/` directory (see Inputs).
+Raw sequence data are **not included** in this repository due to size and licensing constraints.  
+Users should download the required FASTA and reference tables (see *Inputs*) and place them either in the repository root (legacy names) or under the `data/` directory (README-style names).
 
 ---
 
 ## 5. Inputs
 
-Expected under a local `data/` directory (you may choose any location; paths can be overridden via command-line arguments):
-- `nucleotide.fasta` — nucleotide sequences with pipe-delimited headers.
-- `nonhuman.fasta` — non-human sequences if kept separate (optional; otherwise inferred).
-- `cds.fasta` — CDS records; RSCU/CAI retain `complete_cds`; keep `partial_cds` ≥ 600 nt; filter `unknown` by length.
-- `protein.fasta` — protein sequences (prefer those from complete genomes).
-- `ictv_species_list.csv` — ICTV species list.
-- `ictv_renaming_table.csv` — ICTV old↔new names.
-- `virus_hostdb_human.csv` — Virus-Host DB list of human viruses.
-- `manual_mapping.csv` — curated mapping.
+The pipeline expects several input FASTA and reference files.  
+Two naming conventions are supported:
 
-All input file paths are provided via command-line arguments. Data files **do not** need to sit in the same folder as the script, but should be referenced consistently (e.g., `--cds data/cds.fasta`). The recommended setup is to keep all inputs in a project-level `data/` directory.
+### A. Legacy names (place directly in the repository root)
+- `sequences_human.fasta`  
+- `sequences_nothuman.fasta`  
+- `sequences_CDS.fasta`  
+- `sequences_protein.fasta`  
+- `human_HK_CDS.cleaned.fasta`  
+- `Orthobunyavirus_taxonomy.xlsx`  
+- `ICTV_2024_Taxa Renamed or Abolished.csv`  
+- `ICTV_2024_MSL.csv`  
+- `ICTV Orthobunyavirus.csv`  
+- `human_virus_DB_species_clean.txt`  
+
+### B. README-style names (place in `data/` subdirectory)
+- `data/nucleotide.fasta`  
+- `data/nonhuman.fasta`  
+- `data/cds.fasta`  
+- `data/protein.fasta`  
+- `data/human_HK_CDS.cleaned.fasta`  
+- Other reference tables may also be placed under `data/`
 
 ---
 
 ## 6. Usage
 
-### Default run (with files placed under `data/`)
-```bash
-python src/project_pipeline.py
-```
-This uses the following defaults:
-- `--nucleotide data/nucleotide.fasta`
-- `--nonhuman  data/nonhuman.fasta`
-- `--cds       data/cds.fasta`
-- `--protein   data/protein.fasta`
-- `--reference data/human_HK_CDS.cleaned.fasta`
-- `--outdir    results/`
+### Windows example
+```powershell
+# If 'conda activate' is not available, call python.exe inside your conda env:
+C:/Users/<user>/.conda/envs/<env_name>/python.exe src/project_pipeline.py --help
 
-### Custom run (specify file paths explicitly)
-```bash
-python src/project_pipeline.py \
-  --nucleotide mydata/human.fasta \
-  --nonhuman  mydata/nonhuman.fasta \
-  --cds       mydata/cds_subset.fasta \
-  --protein   mydata/proteins.fasta \
-  --reference mydata/HK_reference.fasta \
-  --outdir    custom_results
+# Minimal run (auto-detect inputs; outputs to results_cli/)
+C:/Users/<user>/.conda/envs/<env_name>/python.exe src/project_pipeline.py --outdir results_cli
 ```
 
-### Reuse existing results
-You may configure the script to skip computation and only plot from existing CSVs (e.g., `results/tables/lovo_results.csv`).
+### Linux / macOS example
+```bash
+conda activate orthobunya
+python src/project_pipeline.py --outdir results_cli
+```
 
-### Debug mode (subset run)
-Uncomment the sampling *if-block* around the debug section in the script (search for: `Debug: run only 12 human + 8 nonhuman species`).  
-This samples **12 human** + **8 nonhuman** species for a quick run (~1.5 h). Re-comment the block for full runs.
+Notes:
+- If inputs are not provided via CLI, the script automatically detects files in the **repo root (legacy names)**, falling back to **`data/` (README names)**.  
+- All new outputs are collected under `results/` (or `--outdir`). Logs are saved there as `pipeline_log.txt`.
 
 ---
 
-## 7. Outputs
+## 7. Results
 
-Under the chosen output directory (default `results/`), the pipeline writes:
-- **tables/**: main label table, species summary, relabel stats, merged feature tables, `lovo_results.csv`, `train_test_results.csv`, feature-importance summaries.
-- **figs/**: performance comparison, LOVO boxplots, UMAP projections, clustermaps, feature-importance plots.
-- **logs/**: runtime logs.
-- `pipeline_feature_set_coverage_summary.csv`.
+- All outputs generated at the repository root are automatically moved to `results/` (or the directory passed with `--outdir`).  
+- Subfolders include:  
+  - `tables/`: metadata, train-test and LOVO results, feature-importance summaries.  
+  - `figs/`: performance plots, LOVO boxplots, UMAPs, clustermaps, feature-importance plots.  
+  - `logs/`: runtime logs.  
 
 ---
 
 ## 8. Computational environment and reproducibility
 
-All thresholds (e.g., `min_partial_length = 600 nt`), completeness filters, k-mer sizes, and class-weight options are set via script parameters.
-
 Analyses were run in:
-- Python ≥3.8
-- Biopython ≥1.8
-- pandas ≥1.5
-- scikit-learn ≥1.2
-- matplotlib ≥3.7
-- seaborn ≥0.12
-- umap-learn ≥0.5
-- iFeatureOmegaCLI (current public release)
+- Python ≥3.8  
+- Biopython ≥1.8  
+- pandas ≥1.5  
+- scikit-learn ≥1.2  
+- matplotlib ≥3.7  
+- seaborn ≥0.12  
+- umap-learn ≥0.5  
+- iFeatureOmegaCLI (optional external tool)  
 
 Randomised procedures used fixed seeds (42):
-- Random Forest (`random_state=42`)
-- Stratified 80/20 split (`random_state=42`)
-- Group-aware 5-fold CV with shuffling (`StratifiedGroupKFold(..., random_state=42)`)
+- Random Forest (`random_state=42`)  
+- Stratified 80/20 split (`random_state=42`)  
+- Group-aware 5-fold CV with shuffling (`StratifiedGroupKFold(..., random_state=42)`)  
 
-Intermediate outputs, logs, and provenance files are retained for reproducibility.  
-On our hardware, a **full run (136 species)** with group-aware CV required ~13–14 h; the **debug subset (20 species)** ~1.5 h.
+Intermediate outputs, logs, and provenance files are retained for reproducibility.
 
 ---
 
-## 9. Citation
+## 9. Intersection fallback
+
+- When all three feature sets are available: **3-way intersection**.  
+- When only two are available: **2-way intersection**.  
+- If intersection is empty: fall back to the richest available single set (priority: **RSCU → k-mer → protein**).  
+- This ensures the ML evaluation always runs, even without protein features.
+
+---
+
+## 10. Citation
 
 ```bibtex
 @software{jin_orthobunyavirus_pipeline_2025,
   author  = {Jin, Fengshi},
   title   = {Orthobunyavirus Host-Prediction Pipeline},
   year    = {2025},
-  url     = {https://github.com/spike107/orthobunyavirus-host-prediction/releases/tag/v1.0.0},
-  version = {v1.0.0}
+  url     = {https://github.com/spike107/orthobunyavirus-host-prediction/releases/tag/v1.0.1},
+  version = {v1.0.1}
 }
 ```
 
 ---
 
-## 10. License
+## 11. License
 
 MIT License (see `LICENSE`).  
-Data are not distributed — users must obtain sequences and reference tables from their original sources (NCBI, ICTV, Virus-Host DB, etc.).
+Input data are **not distributed** — users must obtain FASTA and reference tables from ICTV, Virus-Host DB, NCBI, etc.
 
 ---
 
-## 11. Contact
+## 12. Contact
 
 Please open GitHub issues or pull requests.
