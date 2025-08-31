@@ -22,6 +22,7 @@ Key script: `src/project_pipeline.py`.
 
 ## 2. Repository Layout
 
+```
 .
 ├─ README.md
 ├─ environment.yml
@@ -29,16 +30,17 @@ Key script: `src/project_pipeline.py`.
 ├─ LICENSE
 ├─ CITATION.cff
 ├─ .gitignore
-├─ data/ # optional: place inputs here if using README-style names
-├─ results/ # created automatically; all outputs collected here
+├─ data/            # optional: place inputs here if using README-style names
+├─ results/         # created automatically; all outputs collected here
 └─ src/
-└─ project_pipeline.py
+   └─ project_pipeline.py
 ```
 
 > Note: the `data/` directory is optional. Users may either place input files in the repository root (legacy names) or under `data/` (README-style names).  
 > The `results/` directory is created automatically during runtime.
 
 ---
+
 
 ## 3. Installation
 
